@@ -1,4 +1,2 @@
 # Virtual environment
-venv/
-env/
-ENV/
+.env
