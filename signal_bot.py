@@ -28,7 +28,7 @@ logging.basicConfig(
 # Configuration
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-EXCHANGE_NAME = 'coinex'
+EXCHANGE_NAME = 'binance'
 SYMBOL = 'ETH/USDT'
 TIMEFRAME = '5m'
 DATA_FILE = 'signals_history.json'
