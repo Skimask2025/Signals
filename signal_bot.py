@@ -33,12 +33,11 @@ SYMBOL = 'ETH/USDT'
 TIMEFRAME = '5m'
 DATA_FILE = 'signals_history.json'
 
-# Strategy Parameters
+# Strategy Parameters - UPDATED FOR TRUE TRAILING STOP
 FAST_MA_PERIOD = 50
 SLOW_MA_PERIOD = 200
 ATR_PERIOD = 14
-TRAILING_STOP_PERCENT = 0.10
-TAKE_PROFIT_MULTIPLIER = 2.0
+TRAILING_STOP_PERCENT = 0.05  # 5% trailing stop (more aggressive)
 
 # Global trade history
 trade_history = {
@@ -170,15 +169,13 @@ def fetch_ohlcv_data(exchange, symbol: str, timeframe: str, limit: int = 500) ->
         return pd.DataFrame()
 
 def check_trading_signals(df: pd.DataFrame) -> Dict:
-    """Check for trading signals based on strategy"""
+    """Check for trading signals based on strategy - WITH TRUE TRAILING STOP"""
     signals = {
         'buy_signal': False,
         'sell_signal': False,
-        'stop_loss_hit': False,
-        'take_profit_hit': False,
+        'trailing_stop_hit': False,  # CHANGED FROM stop_loss_hit
+        'trend_reversal': False,
         'entry_price': 0,
-        'stop_loss': 0,
-        'take_profit': 0,
         'current_price': df['close'].iloc[-1] if not df.empty else 0,
         'fast_ma': 0,
         'slow_ma': 0,
@@ -234,34 +231,35 @@ def check_trading_signals(df: pd.DataFrame) -> Dict:
     if crossover_up and not trade_history['active_trade']:
         signals['buy_signal'] = True
         signals['entry_price'] = current_price
-        signals['stop_loss'] = current_price * (1 - TRAILING_STOP_PERCENT)
-        signals['take_profit'] = current_price + (current_atr * TAKE_PROFIT_MULTIPLIER)
         logging.info("BUY SIGNAL DETECTED!")
     
-    # Check for active trade conditions
+    # Check for active trade conditions - WITH TRUE TRAILING STOP
     if trade_history['active_trade']:
         active_trade = trade_history['active_trade']
+        current_price = signals['current_price']
         
         logging.info("ACTIVE TRADE:")
         logging.info(f"   Entry Price: ${active_trade['entry_price']:.2f}")
-        logging.info(f"   Stop Loss: ${active_trade['stop_loss']:.2f}")
-        logging.info(f"   Take Profit: ${active_trade['take_profit']:.2f}")
+        logging.info(f"   Current Trailing Stop: ${active_trade['trailing_stop']:.2f}")  # CHANGED
         logging.info(f"   Current P/L: {((current_price / active_trade['entry_price']) - 1) * 100:.2f}%")
         
-        # Check for stop loss hit
-        if current_price <= active_trade['stop_loss']:
-            signals['stop_loss_hit'] = True
-            signals['sell_signal'] = True
-            logging.info("STOP LOSS HIT!")
+        # TRUE TRAILING STOP: Update as price increases
+        if current_price > active_trade['entry_price']:
+            new_trailing_stop = current_price * (1 - TRAILING_STOP_PERCENT)
+            # Only move stop loss up, never down
+            if new_trailing_stop > active_trade['trailing_stop']:
+                active_trade['trailing_stop'] = new_trailing_stop
+                logging.info(f"TRAILING STOP UPDATED: {new_trailing_stop:.2f}")
         
-        # Check for take profit hit
-        elif current_price >= active_trade['take_profit']:
-            signals['take_profit_hit'] = True
+        # Check for trailing stop hit - PRIMARY EXIT
+        if current_price <= active_trade['trailing_stop']:
+            signals['trailing_stop_hit'] = True  # CHANGED
             signals['sell_signal'] = True
-            logging.info("TAKE PROFIT HIT!")
+            logging.info("TRAILING STOP HIT!")  # CHANGED
         
-        # Check for trend reversal sell
+        # Check for trend reversal sell - SECONDARY EXIT
         elif crossover_down:
+            signals['trend_reversal'] = True
             signals['sell_signal'] = True
             logging.info("TREND REVERSAL SELL SIGNAL!")
     
@@ -274,12 +272,13 @@ def process_signal(signals: Dict, df: pd.DataFrame):
     
     if signals['buy_signal'] and not trade_history['active_trade']:
         trade_id = f"{current_time}_{signals['entry_price']}"
+        initial_trailing_stop = signals['entry_price'] * (1 - TRAILING_STOP_PERCENT)
+        
         trade_history['active_trade'] = {
             'entry_price': signals['entry_price'],
             'entry_time': current_time,
             'direction': 'LONG',
-            'stop_loss': signals['stop_loss'],
-            'take_profit': signals['take_profit'],
+            'trailing_stop': initial_trailing_stop,  # CHANGED TO TRAILING STOP
             'trade_id': trade_id
         }
         trade_history['total_trades'] += 1
@@ -289,8 +288,7 @@ def process_signal(signals: Dict, df: pd.DataFrame):
             'type': 'BUY',
             'timestamp': current_time,
             'price': signals['entry_price'],
-            'stop_loss': signals['stop_loss'],
-            'take_profit': signals['take_profit'],
+            'trailing_stop': initial_trailing_stop,  # CHANGED
             'trade_id': trade_id,
             'status': 'OPEN'
         }
@@ -299,10 +297,10 @@ def process_signal(signals: Dict, df: pd.DataFrame):
         message = f"🚀 <b>BUY SIGNAL</b> 🚀\n\n"
         message += f"<b>Symbol:</b> {SYMBOL}\n"
         message += f"<b>Entry Price:</b> ${signals['entry_price']:.2f}\n"
-        message += f"<b>Stop Loss:</b> ${signals['stop_loss']:.2f}\n"
-        message += f"<b>Take Profit:</b> ${signals['take_profit']:.2f}\n"
+        message += f"<b>Initial Trailing Stop:</b> ${initial_trailing_stop:.2f}\n"  # CHANGED
+        message += f"<b>Trailing Percent:</b> {TRAILING_STOP_PERCENT*100}%\n"
         message += f"<b>Time:</b> {current_time}\n"
-        message += f"<b>Strategy:</b> Trend Following (MA Crossover)\n"
+        message += f"<b>Strategy:</b> MA Crossover + Dynamic Trailing Stop\n"
         message += f"<b>Historical Accuracy:</b> {calculate_accuracy():.2f}%"
         message += f"\n<b>Total Signals:</b> {trade_history['total_trades']}"
         
@@ -316,11 +314,10 @@ def process_signal(signals: Dict, df: pd.DataFrame):
         active_trade = trade_history['active_trade']
         trade_id = active_trade['trade_id']
         
+        # DETERMINE EXIT TYPE - UPDATED FOR TRAILING STOP
         exit_type = "TREND REVERSAL"
-        if signals['stop_loss_hit']:
-            exit_type = "STOP LOSS"
-        elif signals['take_profit_hit']:
-            exit_type = "TAKE PROFIT"
+        if signals['trailing_stop_hit']:  # CHANGED
+            exit_type = "TRAILING STOP"  # CHANGED
         
         pnl_percent = ((current_price / active_trade['entry_price']) - 1) * 100
         outcome = "PROFIT" if pnl_percent > 0 else "LOSS"
@@ -339,16 +336,18 @@ def process_signal(signals: Dict, df: pd.DataFrame):
                     'exit_time': current_time,
                     'pnl_percent': pnl_percent,
                     'outcome': outcome,
-                    'status': 'CLOSED'
+                    'status': 'CLOSED',
+                    'final_trailing_stop': active_trade['trailing_stop']  # ADD FINAL TRAILING STOP
                 })
                 break
         
         original_message_id = trade_history['message_ids'].get(trade_id)
         
-        message = f"📉 <b>{exit_type} HIT</b> 📉\n\n"
+        message = f"📉 <b>{exit_type}</b> 📉\n\n"
         message += f"<b>Symbol:</b> {SYMBOL}\n"
         message += f"<b>Exit Price:</b> ${current_price:.2f}\n"
         message += f"<b>Entry Price:</b> ${active_trade['entry_price']:.2f}\n"
+        message += f"<b>Final Trailing Stop:</b> ${active_trade['trailing_stop']:.2f}\n"
         message += f"<b>P/L:</b> {pnl_percent:.2f}%\n"
         message += f"<b>Outcome:</b> {outcome}\n"
         message += f"<b>Time:</b> {current_time}\n"
@@ -376,9 +375,12 @@ def print_signal_summary():
     print(f"\n=== LAST 10 SIGNALS ===")
     for signal in trade_history['all_signals'][-10:]:
         if signal['type'] == 'BUY':
-            print(f"BUY - {signal['timestamp']} - Price: ${signal['price']:.2f} - Status: {signal.get('status', 'OPEN')}")
+            status = f"Status: {signal.get('status', 'OPEN')}"
+            if 'final_trailing_stop' in signal:
+                status += f", Final TS: ${signal['final_trailing_stop']:.2f}"
+            print(f"BUY - {signal['timestamp']} - Price: ${signal['price']:.2f} - {status}")
         else:
-            print(f"SELL - {signal['timestamp']} - Price: ${signal['price']:.2f}")
+            print(f"SELL - {signal['timestamp']} - Price: ${signal['price']:.2f} - Exit: {signal.get('exit_type', 'N/A')}")
 
 def main():
     """Main function to run the signal generator"""
@@ -410,7 +412,7 @@ def main():
     
     # Send startup message
     startup_msg = "🤖 <b>Live Signal Generator Activated</b> 🤖\n\n"
-    startup_msg += f"<b>Strategy:</b> Improved Trend Follower\n"
+    startup_msg += f"<b>Strategy:</b> MA Crossover (50/200) + 5% Dynamic Trailing Stop\n"
     startup_msg += f"<b>Symbol:</b> {SYMBOL}\n"
     startup_msg += f"<b>Timeframe:</b> {TIMEFRAME}\n"
     startup_msg += f"<b>Latest Price:</b> ${test_df['close'].iloc[-1]:.2f}\n"
